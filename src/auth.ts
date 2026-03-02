@@ -92,34 +92,43 @@ async function loadSavedWallet(): Promise<string | undefined> {
  * Like loadSavedWallet(), refuses to silently ignore a corrupt mnemonic file
  * to protect Solana funds derived from it.
  */
-async function loadMnemonic(): Promise<string | undefined> {
+async function loadMnemonic(options?: { strict?: boolean }): Promise<string | undefined> {
+  const strict = options?.strict ?? false;
   try {
     const mnemonic = (await readTextFile(MNEMONIC_FILE)).trim();
     if (mnemonic && isValidMnemonic(mnemonic)) {
       return mnemonic;
     }
-    // File exists but content is invalid — do NOT silently fall through.
-    // A Solana wallet was derived from this mnemonic; ignoring it would abandon those funds.
-    console.error(`[ClawRouter] ✗ CRITICAL: Mnemonic file exists but has invalid format!`);
-    console.error(`[ClawRouter]   File: ${MNEMONIC_FILE}`);
-    console.error(`[ClawRouter]   To fix: restore your mnemonic backup or delete the file to start fresh`);
-    throw new Error(
-      `Mnemonic file at ${MNEMONIC_FILE} is corrupted or has wrong format. ` +
-      `Refusing to ignore it to protect Solana funds derived from this mnemonic. ` +
-      `Restore your mnemonic backup or delete the file if no Solana funds are at risk.`,
-    );
-  } catch (err) {
-    // Re-throw corruption errors, only swallow ENOENT (file not found)
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-      if (err instanceof Error && err.message.includes("Refusing to ignore")) {
-        throw err;
-      }
-      // Unexpected read error — also refuse to silently ignore
+    // File exists but content is invalid.
+    if (strict) {
+      // Solana path: refuse to ignore — funds may be derived from this mnemonic.
+      console.error(`[ClawRouter] ✗ CRITICAL: Mnemonic file exists but has invalid format!`);
+      console.error(`[ClawRouter]   File: ${MNEMONIC_FILE}`);
+      console.error(`[ClawRouter]   To fix: restore your mnemonic backup or delete the file to start fresh`);
       throw new Error(
-        `Cannot read mnemonic file at ${MNEMONIC_FILE}: ${err instanceof Error ? err.message : String(err)}. ` +
-        `Refusing to ignore it to protect Solana funds. ` +
-        `Fix file permissions or delete the file if no Solana funds are at risk.`,
+        `Mnemonic file at ${MNEMONIC_FILE} is corrupted or has wrong format. ` +
+        `Refusing to ignore it to protect Solana funds derived from this mnemonic. ` +
+        `Restore your mnemonic backup or delete the file if no Solana funds are at risk.`,
       );
+    }
+    // Base path: warn but continue — mnemonic is not critical for EVM-only usage.
+    console.warn(`[ClawRouter] ⚠ Mnemonic file exists but has invalid format — ignoring (Base-only mode)`);
+    return undefined;
+  } catch (err) {
+    // Re-throw corruption errors from strict mode
+    if (err instanceof Error && err.message.includes("Refusing to ignore")) {
+      throw err;
+    }
+    // Only swallow ENOENT (file not found)
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      if (strict) {
+        throw new Error(
+          `Cannot read mnemonic file at ${MNEMONIC_FILE}: ${err instanceof Error ? err.message : String(err)}. ` +
+          `Refusing to ignore it to protect Solana funds. ` +
+          `Fix file permissions or delete the file if no Solana funds are at risk.`,
+        );
+      }
+      console.warn(`[ClawRouter] ⚠ Cannot read mnemonic file — ignoring (Base-only mode)`);
     }
   }
   return undefined;
@@ -146,7 +155,7 @@ async function generateAndSaveWallet(): Promise<{
 }> {
   // Safety: if a mnemonic file already exists, a Solana wallet was derived from it.
   // Generating a new wallet would overwrite the mnemonic and lose Solana funds.
-  const existingMnemonic = await loadMnemonic();
+  const existingMnemonic = await loadMnemonic({ strict: true });
   if (existingMnemonic) {
     throw new Error(
       `Mnemonic file exists at ${MNEMONIC_FILE} but wallet.key is missing. ` +
@@ -232,7 +241,7 @@ export async function resolveOrGenerateWalletKey(options?: {
     const account = privateKeyToAccount(saved as `0x${string}`);
 
     // Check if mnemonic exists (Solana support enabled)
-    let mnemonic = await loadMnemonic();
+    let mnemonic = await loadMnemonic({ strict: wantSolana });
 
     // Auto-setup Solana if user opted in but no mnemonic exists yet
     if (!mnemonic && wantSolana) {
@@ -268,7 +277,7 @@ export async function resolveOrGenerateWalletKey(options?: {
     const account = privateKeyToAccount(envKey as `0x${string}`);
 
     // Check if mnemonic exists (Solana support enabled) — same as "saved" path
-    let mnemonic = await loadMnemonic();
+    let mnemonic = await loadMnemonic({ strict: wantSolana });
 
     // Auto-setup Solana if user opted in but no mnemonic exists yet
     // Note: env-var users need a saved wallet.key for setupSolana(), so we skip if not present
@@ -326,7 +335,7 @@ export async function setupSolana(): Promise<{
   solanaPrivateKeyBytes: Uint8Array;
 }> {
   // Safety: mnemonic must not already exist
-  const existing = await loadMnemonic();
+  const existing = await loadMnemonic({ strict: true });
   if (existing) {
     throw new Error(
       "Solana wallet already set up. Mnemonic file exists at " + MNEMONIC_FILE,
